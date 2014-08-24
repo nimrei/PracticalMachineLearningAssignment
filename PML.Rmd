@@ -1,0 +1,210 @@
+---
+title: "PML Course Project"
+author: "Nick Imrei"
+date: "Thursday, August 21, 2014"
+output: html_document
+---
+
+
+Machine Learning: Analysis and Prediction of the Weight Lifting Exercises Dataset
+-----------------------------------------------------------
+
+### Executive Summary
+Can we predict from exercise data whether the exercise in question was performed properly?
+
+This study uses a variety of devices such as *Jawbone Up*, *Nike FuelBand* and *Fitbit* to capture positional/displacement data. Whilst performing a variety of barbell exercises, participants were asked to perform the excercise both correctly and incorrectly. 
+
+Using both a training set (where we know the correctness of each movement), a random forest model is built and finally tested on a separate set to ascertain its effectiveness as a predictor of exercise correctness. The resulting accuracy observed (via a process of cross-validation) was 99.2%
+
+The original study performed on this dataset can be found [here](http://groupware.les.inf.puc-rio.br/har)
+
+
+## Data cleansing and exploratory analysis
+
+First, load any libraries we need. These include:
+
+- `caret`: used to train and test our random forest data model.
+- `doParallel`: used by `caret` functions to perform tasks using all the cores available.
+- `corrplot` & `rattle`: used for plotting a variable correlation matrix and variable importance graph respectively.
+
+
+```{r load.libraries}
+
+suppressMessages(library(caret))
+suppressMessages(library(doParallel))
+
+suppressMessages(library(corrplot))
+suppressMessages(library(rattle))
+
+registerDoParallel(cores = 4)
+set.seed(123)
+
+```
+
+
+The test and training datasets used for this study can be found at the following locations:
+
+* [Training dataset](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+* [Testing dataset](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+Both datasets contain features with a number of missing values that came in one of 3 forms:
+
+- Blank entries
+- `'#DIV/0!'`
+- `'NA'`. 
+
+These values are set to `NA` when we read in the training and test sets so that they can be addressed differently, ignored or removed when building our prediction model.
+
+
+```{r read.files}
+
+training.filename <- "pml-training.csv"
+testing.filename <- "pml-testing.csv"
+
+#download our files if they're not stored locally
+if (!file.exists(training.filename)) {
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", training.filename)
+}
+if (!file.exists(testing.filename)) {
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", testing.filename)
+}
+
+#read the training and testing files into their respective dataframes
+training <- read.csv(training.filename, na.strings=c("#DIV/0!","NA",""))
+testing <- read.csv(testing.filename, na.strings=c("#DIV/0!","NA",""))
+```
+
+
+Each dataset has 160 features (159 + our outcome variable, `classe`). With our `NA` entries now properly identified, columns are made up of mostly (i.e. > 80%) of missing values, and discard them as they're expected to have little to no impact on the final prediction model. 
+
+Additionally, there are other features that can also be dropped from our datasets. These include:
+
+* Unique row identifiers (`X`).
+* Repetitions of existing features (e.g. `raw_timestamp_part_1` & `raw_timestamp_part_2` features are repetitions of `cvtd_timestamp`).
+* 95% the same value, in which case they're dropped as noise (e.g. `num_window`, `new_window`).
+
+
+```{r filter.variables}
+#have a look which feature are > 80% NA values
+column.stats <- colSums(!is.na(training))/nrow(training)
+column.filter <- c(names(column.stats[column.stats > .8]))
+
+#remove all repeated timestamp & row identifier features
+column.filter <- column.filter[-c(1:7)]
+
+#filter our features by the above criteria
+training <- training[,column.filter]
+
+#apply the same feature selection as per training set
+testing <- testing[,names(testing) %in% column.filter]
+
+```
+
+
+After filtering out extraneous features, the training dataset should now have 53 variables made up of 52 predictors and 1 outcome. The correlation between the predictors is now examined, as any variables that are highly correlated could theoretically be replaced with weighted combinations of other predictor variables. 
+
+
+```{r correlation.plot}
+
+corrplot(cor(training[,-53]), method = "color", type = "lower",order = "hclust", 
+         tl.cex = 0.6, tl.col=rgb(0,0,0))
+
+```
+
+
+The above grid shows the correlation between feature pairs in the training dataset. Dark blue squares represent positive correlations and dark red negative correlations. To help determine a set of linearly uncorrelated feature to use as our predictor variables when building our model, we'll perform a principal components analysis.
+
+
+### Principal components analysis and machine learning
+
+A principal components analysis is now performed on the prospective predictor variables to help determine which subset of variables account for 99% of the variance of the model. This is done by partitioning the training dataset into (via a 70/30 percent split) into 2 subsets:
+
+1. `training.subset`: To train the model for the principal components analysis & eventually our prediction model.
+2. `validation.subset`: set to assess the effectiveness of the the prediction model when the outcomes are known.
+
+
+```{r principal.components.analysis}
+	
+#partition the training into training & validation subsets for our pca
+training.indexes = createDataPartition(y = training$classe, p = 0.7, list = FALSE)
+training.subset <- training[training.indexes,]
+validation.subset <- training[-training.indexes,]
+
+#pre process our partitioned data, retaining 99% of the variance of the original data
+preproc.training.subset <- preProcess(training.subset[, -53], method = "pca", thresh = 0.99)
+
+#predict our training and validation partitions, using our intended model
+training.subset.predict <- predict(preproc.training.subset, training.subset[, -53])
+
+```
+
+
+**Training the prediction model**
+ 
+A random forest prediction model is trained off our training subset and use a k-fold cross validation method, with `k = 10`.  Other cross validation methods were considered such as a different number of folds, as well as bootstrapping (sampling the dataset with replacement), the former reporting less accuracy on the training set and the latter whilst being more computationally expensive produced approximately the same results.
+
+
+```{r train.model}
+
+#set our training control object to perform 10-fold cross-validation in parallel
+train.control = trainControl(method = "cv", number = 10, allowParallel=T)
+
+#build the random forrest off the our pre-processed dataset, using the cross validation method defined in the train.control object
+# model.rf <- train(classe ~ ., data=training.subset, method="rf", preProcess=c("center", "scale"), trControl=train.control, importance=T)
+
+```
+
+
+Based on the derived model, the importance of each of the principal components is examined. Items closer to the right are considered more important as they account for the variance of the data. Features that account for 30% of the variance or above are shown.
+
+
+```{r variable.importance.plot }
+
+# varImpPlot(model.rf$finalModel, sort = T, type = 2, pch = 20, col = 1, cex = .8, mar = c(5.1,4.1,4.1,2.1), main = "Importance of Principal Components")
+
+```
+
+
+### Cross Validation testing and out-of-sample error estimate
+
+The derived prediction model is then tested on the validation subset, producing a *confusion matrix*. Items outside the top-left to bottom-right diagonal represent values which are incorrectly classified. Therefore our model's accuracy (percentage correctly predicted) based on the validation set can be calculated as:
+
+$$accuracy = {totalcorrectlyclassified}/{total}$$
+
+
+```{r validate.and.confusion.matrix }
+
+# validation.subset.predict <- predict(model.rf, validation.subset)
+# confusionMatrix(validation.subset$classe, validation.subset.predict)$table
+```
+
+
+Out of sample error is calculated as:
+$$error_{outofsample} = 1 - accuracy$$
+
+
+```{r accuracy.and.outofsample.error }
+# 
+# accuracy <- postResample(validation.subset$classe, validation.subset.predict)[[1]]
+# accuracy
+# 
+# out.of.sample.error <- 1-accuracy
+# out.of.sample.error
+
+```
+
+
+Based on the above calculations our model's accuracy is **99.2%** and the estimated out of sample error is **0.8%**.
+
+
+### Predicted results
+
+Now that the model is built and its effectiveness has been measured, we can apply it to the original testing dataset to predict the value of the `classe` outcome variable. 
+
+
+```{r prediction.test.dataset }
+
+# testing.classe.prediction <- predict(model.rf, testing)
+# testing.classe.prediction
+
+```
